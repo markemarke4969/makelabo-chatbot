@@ -15,6 +15,17 @@ const KNOWLEDGE_ROOM_ID = process.env.KNOWLEDGE_ROOM_ID;
 const anthropic = new Anthropic({ apiKey: CLAUDE_API_KEY });
 const knowledgePath = path.join(__dirname, "knowledge.txt");
 
+// 処理済みメッセージIDを記録（重複防止）
+const processedMessages = new Set();
+const MAX_PROCESSED = 10000;
+
+function isProcessed(messageId) {
+  if (processedMessages.has(messageId)) return true;
+  if (processedMessages.size >= MAX_PROCESSED) processedMessages.clear();
+  processedMessages.add(messageId);
+  return false;
+}
+
 // ナレッジファイル読み込み
 function loadKnowledge() {
   try {
@@ -78,6 +89,12 @@ app.post("/webhook", async (req, res) => {
   try {
     const event = req.body.webhook_event;
     if (!event || !event.body) return;
+
+    const messageId = String(event.message_id);
+    if (isProcessed(messageId)) {
+      console.log("重複メッセージをスキップ:", messageId);
+      return;
+    }
 
     const roomId = String(event.room_id);
     const messageBody = event.body;
