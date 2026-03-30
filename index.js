@@ -101,19 +101,21 @@ app.post("/webhook", (req, res) => {
 });
 
 async function handleWebhook(body) {
+  console.log("Webhook受信:", JSON.stringify(body).substring(0, 300));
+
   const event = body.webhook_event;
   if (!event || !event.body) return;
 
-  // ③ webhook_event_id と message_id の両方で重複チェック
-  const webhookEventId = body.webhook_event_id;
+  // message_idで重複チェック（webhook_event_idがある場合はそちらも併用）
   const messageId = event.message_id;
+  const webhookEventId = body.webhook_event_id;
 
-  if (isDuplicate(`webhook_${webhookEventId}`)) {
-    console.log("重複webhook_event_idをスキップ:", webhookEventId);
+  if (messageId && isDuplicate(`msg_${messageId}`)) {
+    console.log("重複message_idをスキップ:", messageId);
     return;
   }
-  if (isDuplicate(`msg_${messageId}`)) {
-    console.log("重複message_idをスキップ:", messageId);
+  if (webhookEventId && isDuplicate(`webhook_${webhookEventId}`)) {
+    console.log("重複webhook_event_idをスキップ:", webhookEventId);
     return;
   }
 
