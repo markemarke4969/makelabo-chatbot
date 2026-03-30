@@ -13,7 +13,7 @@ const SUPPORT_ROOM_ID = process.env.SUPPORT_ROOM_ID;
 const KNOWLEDGE_ROOM_ID = process.env.KNOWLEDGE_ROOM_ID;
 
 const anthropic = new Anthropic({ apiKey: CLAUDE_API_KEY });
-const knowledgePath = path.join(__dirname, "knowledge.txt");
+const knowledgePath = path.resolve(__dirname, "knowledge.txt");
 
 // 処理済みIDを記録（重複防止：message_id + webhook_event_id 両方チェック）
 const processedIds = new Set();
@@ -144,8 +144,15 @@ const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
   console.log("__dirname:", __dirname);
-  console.log("knowledge.txt パス:", knowledgePath);
-  console.log("knowledge.txt 存在:", fs.existsSync(knowledgePath));
-  // 起動時にナレッジ内容を確認
-  loadKnowledge();
+  console.log("knowledge.txt 絶対パス:", knowledgePath);
+
+  if (fs.existsSync(knowledgePath)) {
+    const content = loadKnowledge();
+    console.log(`ナレッジ読み込み完了：${content.length}文字`);
+  } else {
+    console.warn("knowledge.txt が見つかりません。パス:", knowledgePath);
+    // 空ファイルを作成しておく
+    fs.writeFileSync(knowledgePath, "", "utf-8");
+    console.log("空のknowledge.txtを作成しました");
+  }
 });
