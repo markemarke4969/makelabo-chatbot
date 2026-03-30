@@ -75,8 +75,8 @@ async function generateReply(userMessage) {
     "ナレッジにない情報は推測で答えず確認を促すこと。";
 
   const response = await anthropic.messages.create({
-    model: "claude-sonnet-4-6",
-    max_tokens: 1024,
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 500,
     system: systemPrompt,
     messages: [{ role: "user", content: userMessage }],
   });
