@@ -15,22 +15,30 @@ const KNOWLEDGE_ROOM_ID = process.env.KNOWLEDGE_ROOM_ID;
 const anthropic = new Anthropic({ apiKey: CLAUDE_API_KEY });
 const knowledgePath = path.join(__dirname, "knowledge.txt");
 
-// 処理済みメッセージIDを記録（重複防止）
-const processedMessages = new Set();
+// 処理済みIDを記録（重複防止：message_id + webhook_event_id 両方チェック）
+const processedIds = new Set();
 const MAX_PROCESSED = 10000;
 
-function isProcessed(messageId) {
-  if (processedMessages.has(messageId)) return true;
-  if (processedMessages.size >= MAX_PROCESSED) processedMessages.clear();
-  processedMessages.add(messageId);
+function isDuplicate(id) {
+  if (!id) return false;
+  const key = String(id);
+  if (processedIds.has(key)) return true;
+  if (processedIds.size >= MAX_PROCESSED) processedIds.clear();
+  processedIds.add(key);
   return false;
 }
 
 // ナレッジファイル読み込み
 function loadKnowledge() {
+  console.log("knowledge.txt パス:", knowledgePath);
+  console.log("ファイル存在:", fs.existsSync(knowledgePath));
   try {
-    return fs.readFileSync(knowledgePath, "utf-8");
-  } catch {
+    const content = fs.readFileSync(knowledgePath, "utf-8");
+    console.log("knowledge.txt 読み込み成功 (文字数:", content.length, ")");
+    console.log("knowledge.txt 先頭100文字:", content.substring(0, 100));
+    return content;
+  } catch (err) {
+    console.error("knowledge.txt 読み込み失敗:", err.message);
     return "";
   }
 }
@@ -82,46 +90,62 @@ app.get("/", (_req, res) => {
 });
 
 // Chatwork Webhook受信
-app.post("/webhook", async (req, res) => {
-  // Webhookの検証リクエストには即座に200を返す
+app.post("/webhook", (req, res) => {
+  // ①即座に200を返す（Chatworkの再送を防ぐ）
   res.status(200).send("OK");
 
-  try {
-    const event = req.body.webhook_event;
-    if (!event || !event.body) return;
-
-    const messageId = String(event.message_id);
-    if (isProcessed(messageId)) {
-      console.log("重複メッセージをスキップ:", messageId);
-      return;
-    }
-
-    const roomId = String(event.room_id);
-    const messageBody = event.body;
-
-    // ナレッジ更新用ルーム
-    if (roomId === KNOWLEDGE_ROOM_ID) {
-      fs.writeFileSync(knowledgePath, messageBody, "utf-8");
-      console.log("knowledge.txt updated");
-      await sendChatworkMessage(
-        roomId,
-        "ナレッジを更新しました。"
-      );
-      return;
-    }
-
-    // サポート用ルーム
-    if (roomId === SUPPORT_ROOM_ID) {
-      const reply = await generateReply(messageBody);
-      await sendChatworkMessage(roomId, reply);
-      return;
-    }
-  } catch (err) {
+  // ②非同期で処理を実行
+  handleWebhook(req.body).catch((err) => {
     console.error("Webhook処理エラー:", err);
-  }
+  });
 });
+
+async function handleWebhook(body) {
+  const event = body.webhook_event;
+  if (!event || !event.body) return;
+
+  // ③ webhook_event_id と message_id の両方で重複チェック
+  const webhookEventId = body.webhook_event_id;
+  const messageId = event.message_id;
+
+  if (isDuplicate(`webhook_${webhookEventId}`)) {
+    console.log("重複webhook_event_idをスキップ:", webhookEventId);
+    return;
+  }
+  if (isDuplicate(`msg_${messageId}`)) {
+    console.log("重複message_idをスキップ:", messageId);
+    return;
+  }
+
+  const roomId = String(event.room_id);
+  const messageBody = event.body;
+
+  // ナレッジ更新用ルーム
+  if (roomId === KNOWLEDGE_ROOM_ID) {
+    fs.writeFileSync(knowledgePath, messageBody, "utf-8");
+    console.log("knowledge.txt updated (文字数:", messageBody.length, ")");
+    console.log("書き込み内容 先頭100文字:", messageBody.substring(0, 100));
+    // 書き込み後の読み戻し確認
+    const verify = fs.readFileSync(knowledgePath, "utf-8");
+    console.log("書き込み後の読み戻し確認 (文字数:", verify.length, ")");
+    await sendChatworkMessage(roomId, "ナレッジを更新しました。");
+    return;
+  }
+
+  // サポート用ルーム
+  if (roomId === SUPPORT_ROOM_ID) {
+    const reply = await generateReply(messageBody);
+    await sendChatworkMessage(roomId, reply);
+    return;
+  }
+}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
+  console.log("__dirname:", __dirname);
+  console.log("knowledge.txt パス:", knowledgePath);
+  console.log("knowledge.txt 存在:", fs.existsSync(knowledgePath));
+  // 起動時にナレッジ内容を確認
+  loadKnowledge();
 });
