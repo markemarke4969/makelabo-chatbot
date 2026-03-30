@@ -106,6 +106,12 @@ async function handleWebhook(body) {
   const event = body.webhook_event;
   if (!event || !event.body) return;
 
+// ボット自身のメッセージを無視
+  if (String(event.account_id) === "10832038") {
+    console.log("ボット自身のメッセージをスキップ");
+    return;
+  }
+
   // message_idで重複チェック（webhook_event_idがある場合はそちらも併用）
   const messageId = event.message_id;
   const webhookEventId = body.webhook_event_id;
