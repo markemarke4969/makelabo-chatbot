@@ -2,6 +2,8 @@ const express = require("express");
 const fs = require("fs");
 const path = require("path");
 const Anthropic = require("@anthropic-ai/sdk");
+const { createClient } = require("@supabase/supabase-js");
+const OpenAI = require("openai");
 
 const app = express();
 app.use(express.json());
@@ -15,7 +17,16 @@ const KNOWLEDGE_ROOM_ID = process.env.KNOWLEDGE_ROOM_ID;
 const anthropic = new Anthropic({ apiKey: CLAUDE_API_KEY });
 const knowledgePath = path.resolve(__dirname, "knowledge.txt");
 
-// 処理済みIDを記録（重複防止：message_id + webhook_event_id 両方チェック）
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY
+);
+
+const openai = new OpenAI({
+  apiKey: process.env.OPENAI_API_KEY,
+});
+
+// 処理済みIDを記録（重複防止）
 const processedIds = new Set();
 const MAX_PROCESSED = 10000;
 
@@ -28,19 +39,27 @@ function isDuplicate(id) {
   return false;
 }
 
-// ナレッジファイル読み込み
-function loadKnowledge() {
-  console.log("knowledge.txt パス:", knowledgePath);
-  console.log("ファイル存在:", fs.existsSync(knowledgePath));
-  try {
-    const content = fs.readFileSync(knowledgePath, "utf-8");
-    console.log("knowledge.txt 読み込み成功 (文字数:", content.length, ")");
-    console.log("knowledge.txt 先頭100文字:", content.substring(0, 100));
-    return content;
-  } catch (err) {
-    console.error("knowledge.txt 読み込み失敗:", err.message);
+// 質問に関連するナレッジをベクトル検索で取得
+async function searchKnowledge(query) {
+  const response = await openai.embeddings.create({
+    model: "text-embedding-ada-002",
+    input: query,
+  });
+  const queryEmbedding = response.data[0].embedding;
+
+  const { data, error } = await supabase.rpc("match_knowledge", {
+    query_embedding: queryEmbedding,
+    match_count: 5,
+  });
+
+  if (error) {
+    console.error("Supabase検索エラー:", error);
     return "";
   }
+
+  const result = data.map((d) => d.content).join("\n\n");
+  console.log(`RAG: ${data.length}チャンク取得, 合計${result.length}文字`);
+  return result;
 }
 
 // Chatworkにメッセージ送信
@@ -62,11 +81,12 @@ async function sendChatworkMessage(roomId, message) {
   }
 }
 
-// Claude APIでAI宮下の返答を生成
+// Claude APIでAI宮下の返答を生成（RAG適用）
 async function generateReply(userMessage) {
-  const knowledge = loadKnowledge();
+  const relevantKnowledge = await searchKnowledge(userMessage);
+
   const systemPrompt =
-    knowledge +
+    relevantKnowledge +
     "\n\n" +
     "あなたはAI宮下です。上記ナレッジに基づいてのみ回答しろ。" +
     "ナレッジに記載のない内容は絶対に答えるな。" +
@@ -76,7 +96,7 @@ async function generateReply(userMessage) {
 
   const response = await anthropic.messages.create({
     model: "claude-haiku-4-5-20251001",
-    max_tokens: 3000,
+    max_tokens: 1500,
     system: systemPrompt,
     messages: [{ role: "user", content: userMessage }],
   });
@@ -91,10 +111,7 @@ app.get("/", (_req, res) => {
 
 // Chatwork Webhook受信
 app.post("/webhook", (req, res) => {
-  // ①即座に200を返す（Chatworkの再送を防ぐ）
   res.status(200).send("OK");
-
-  // ②非同期で処理を実行
   handleWebhook(req.body).catch((err) => {
     console.error("Webhook処理エラー:", err);
   });
@@ -106,13 +123,11 @@ async function handleWebhook(body) {
   const event = body.webhook_event;
   if (!event || !event.body) return;
 
-// ボット自身のメッセージを無視
   if (String(event.account_id) === "10832038") {
     console.log("ボット自身のメッセージをスキップ");
     return;
   }
 
-  // message_idで重複チェック（webhook_event_idがある場合はそちらも併用）
   const messageId = event.message_id;
   const webhookEventId = body.webhook_event_id;
 
@@ -132,8 +147,6 @@ async function handleWebhook(body) {
   if (roomId === KNOWLEDGE_ROOM_ID) {
     fs.writeFileSync(knowledgePath, messageBody, "utf-8");
     console.log("knowledge.txt updated (文字数:", messageBody.length, ")");
-    console.log("書き込み内容 先頭100文字:", messageBody.substring(0, 100));
-    // 書き込み後の読み戻し確認
     const verify = fs.readFileSync(knowledgePath, "utf-8");
     console.log("書き込み後の読み戻し確認 (文字数:", verify.length, ")");
     await sendChatworkMessage(roomId, "ナレッジを更新しました。");
@@ -151,16 +164,5 @@ async function handleWebhook(body) {
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
-  console.log("__dirname:", __dirname);
-  console.log("knowledge.txt 絶対パス:", knowledgePath);
-
-  if (fs.existsSync(knowledgePath)) {
-    const content = loadKnowledge();
-    console.log(`ナレッジ読み込み完了：${content.length}文字`);
-  } else {
-    console.warn("knowledge.txt が見つかりません。パス:", knowledgePath);
-    // 空ファイルを作成しておく
-    fs.writeFileSync(knowledgePath, "", "utf-8");
-    console.log("空のknowledge.txtを作成しました");
-  }
+  console.log("RAG mode: Supabase + OpenAI ベクトル検索");
 });
