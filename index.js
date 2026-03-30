@@ -30,6 +30,10 @@ const openai = new OpenAI({
 const processedIds = new Set();
 const MAX_PROCESSED = 10000;
 
+// 確認待ちのナレッジ追記を一時保存
+// { roomId: { formattedText, section } }
+const pendingKnowledge = new Map();
+
 function isDuplicate(id) {
   if (!id) return false;
   const key = String(id);
@@ -104,6 +108,62 @@ async function generateReply(userMessage) {
   return response.content[0].text;
 }
 
+// ナレッジ追記の整形・分析
+async function analyzeAndFormatKnowledge(rawText) {
+  const knowledge = fs.readFileSync(knowledgePath, "utf-8");
+  const first3000 = knowledge.substring(0, 3000);
+
+  const response = await anthropic.messages.create({
+    model: "claude-haiku-4-5-20251001",
+    max_tokens: 1000,
+    system:
+      "あなたはナレッジ管理の専門家です。" +
+      "ユーザーが入力した一言メモを、ナレッジベースに追記するための整形された文章に変換してください。" +
+      "また、既存ナレッジの構成を見て、どのセクションに追記すべきか判断してください。" +
+      "必ず以下のJSON形式のみで返してください。他の文章は一切不要です：\n" +
+      '{"section": "追加すべきセクション名", "formatted": "整形した文章"}',
+    messages: [
+      {
+        role: "user",
+        content:
+          `既存ナレッジの冒頭（参考）:\n${first3000}\n\n` +
+          `追記したい内容（一言メモ）:\n${rawText}`,
+      },
+    ],
+  });
+
+  try {
+    const text = response.content[0].text;
+    const json = JSON.parse(text);
+    return json;
+  } catch (e) {
+    console.error("JSON解析エラー:", e);
+    return {
+      section: "その他",
+      formatted: rawText,
+    };
+  }
+}
+
+// Supabaseに追加分だけベクトル登録
+async function appendToSupabase(text) {
+  const response = await openai.embeddings.create({
+    model: "text-embedding-ada-002",
+    input: text,
+  });
+  const embedding = response.data[0].embedding;
+
+  const { error } = await supabase
+    .from("knowledge_chunks")
+    .insert({ content: text, embedding });
+
+  if (error) {
+    console.error("Supabase追記エラー:", error);
+    return false;
+  }
+  return true;
+}
+
 // ヘルスチェック
 app.get("/", (_req, res) => {
   res.send("AI宮下 bot is running");
@@ -141,15 +201,58 @@ async function handleWebhook(body) {
   }
 
   const roomId = String(event.room_id);
-  const messageBody = event.body;
+  const messageBody = event.body.trim();
 
   // ナレッジ更新用ルーム
   if (roomId === KNOWLEDGE_ROOM_ID) {
-    fs.writeFileSync(knowledgePath, messageBody, "utf-8");
-    console.log("knowledge.txt updated (文字数:", messageBody.length, ")");
-    const verify = fs.readFileSync(knowledgePath, "utf-8");
-    console.log("書き込み後の読み戻し確認 (文字数:", verify.length, ")");
-    await sendChatworkMessage(roomId, "ナレッジを更新しました。");
+    // 「OK」と返信された場合 → 確認済みで登録
+    if (messageBody === "OK" || messageBody === "ok" || messageBody === "ｏｋ") {
+      const pending = pendingKnowledge.get(roomId);
+      if (!pending) {
+        await sendChatworkMessage(roomId, "確認待ちのナレッジがありません。追記したい内容を投稿してください。");
+        return;
+      }
+
+      // knowledge.txtに追記
+      fs.appendFileSync(knowledgePath, "\n\n" + pending.formatted, "utf-8");
+      console.log("knowledge.txt追記完了:", pending.formatted.substring(0, 50));
+
+      // Supabaseに追記
+      const success = await appendToSupabase(pending.formatted);
+
+      pendingKnowledge.delete(roomId);
+
+      if (success) {
+        await sendChatworkMessage(roomId, "✅ ナレッジに追記しました！\n\n追記内容：\n" + pending.formatted);
+      } else {
+        await sendChatworkMessage(roomId, "⚠️ knowledge.txtへの追記は完了しましたが、Supabaseへの登録に失敗しました。");
+      }
+      return;
+    }
+
+    // 「キャンセル」の場合
+    if (messageBody === "キャンセル" || messageBody === "cancel") {
+      pendingKnowledge.delete(roomId);
+      await sendChatworkMessage(roomId, "キャンセルしました。");
+      return;
+    }
+
+    // 通常の投稿 → 分析・整形して確認メッセージを返す
+    await sendChatworkMessage(roomId, "分析中...少々お待ちください⏳");
+
+    const result = await analyzeAndFormatKnowledge(messageBody);
+    pendingKnowledge.set(roomId, result);
+
+    const confirmMessage =
+      "【ナレッジ追記の確認】\n" +
+      "━━━━━━━━━━━━━━\n" +
+      `追加場所：${result.section}\n\n` +
+      `追加内容：\n${result.formatted}\n` +
+      "━━━━━━━━━━━━━━\n" +
+      "「OK」と返信で登録します\n" +
+      "「キャンセル」で取り消せます";
+
+    await sendChatworkMessage(roomId, confirmMessage);
     return;
   }
 
