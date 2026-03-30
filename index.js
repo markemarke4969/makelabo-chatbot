@@ -134,7 +134,9 @@ async function analyzeAndFormatKnowledge(rawText) {
 
   try {
     const text = response.content[0].text;
-    const json = JSON.parse(text);
+    // ```json ... ``` のコードブロックを除去
+    const clean = text.replace(/```json\s*/g, "").replace(/```\s*/g, "").trim();
+    const json = JSON.parse(clean);
     return json;
   } catch (e) {
     console.error("JSON解析エラー:", e);
